@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 import hashlib
+import json
+
 
 def wrap(func, *args, unsqueeze=False):
     """
@@ -71,3 +73,6 @@ def load_pretrained_weights(model, checkpoint):
     print('load_weight', len(matched_layers))
     # model.state_dict(model_dict).requires_grad = False
     return model
+
+def pretty_print_json(input_json_dict):
+    print(json.dumps(input_json_dict, ensure_ascii=False, indent=4, separators=(',', ':')))
