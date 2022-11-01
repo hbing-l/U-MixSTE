@@ -20,8 +20,8 @@ from timm.models.helpers import load_pretrained
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 from common.rela import RectifiedLinearAttention
-from common.routing_transformer import KmeansAttention
-from common.linearattention import LinearMultiheadAttention
+# from common.routing_transformer import KmeansAttention
+# from common.linearattention import LinearMultiheadAttention
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., changedim=False, currentdim=0, depth=0):

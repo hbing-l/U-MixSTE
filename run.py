@@ -19,7 +19,9 @@ import os
 import sys
 import errno
 import math
-
+from data.h36m_dataset import Human36mDataset
+from data.humaneva_dataset import HumanEvaDataset
+from data.custom_dataset import CustomDataset
 from einops import rearrange, repeat
 from copy import deepcopy
 
@@ -34,6 +36,7 @@ from common.utils import *
 from common.logging import Logger
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
+from common.utils import pretty_print_json
 
 #cudnn.benchmark = True       
 torch.backends.cudnn.deterministic = True
@@ -69,7 +72,8 @@ if not args.nolog:
 print(description)
 print('python ' + ' '.join(sys.argv))
 print("CUDA Device Count: ", torch.cuda.device_count())
-print(args)
+pretty_print_json(vars(args))
+
 
 # if not assign checkpoint path, Save checkpoint file into log folder
 if args.checkpoint=='':
@@ -82,21 +86,19 @@ except OSError as e:
         raise RuntimeError('Unable to create checkpoint directory:', args.checkpoint)
 
 # dataset loading
-print('Loading dataset...')
-dataset_path = 'data/data_3d_' + args.dataset + '.npz'
+print('Loading 3D GT dataset...')
+data_root = args.data_root
+dataset_path = f'{data_root}/data_3d_' + args.dataset + '.npz'
 if args.dataset == 'h36m':
-    from common.h36m_dataset import Human36mDataset
     dataset = Human36mDataset(dataset_path)
 elif args.dataset.startswith('humaneva'):
-    from common.humaneva_dataset import HumanEvaDataset
     dataset = HumanEvaDataset(dataset_path)
 elif args.dataset.startswith('custom'):
-    from common.custom_dataset import CustomDataset
-    dataset = CustomDataset('data/data_2d_' + args.dataset + '_' + args.keypoints + '.npz')
+    dataset = CustomDataset(f'{data_root}/data_2d_' + args.dataset + '_' + args.keypoints + '.npz')
 else:
     raise KeyError('Invalid dataset')
 
-print('Preparing data...')
+print('Preparing 3D GT data: world_to_camera ...')
 for subject in dataset.subjects():
     for action in dataset[subject].keys():
         anim = dataset[subject][action]
@@ -109,8 +111,8 @@ for subject in dataset.subjects():
                 positions_3d.append(pos_3d)
             anim['positions_3d'] = positions_3d
 
-print('Loading 2D detections...')
-keypoints = np.load('data/data_2d_' + args.dataset + '_' + args.keypoints + '.npz', allow_pickle=True)
+print('Loading 2D keypoints...')
+keypoints = np.load(f'{data_root}/data_2d_' + args.dataset + '_' + args.keypoints + '.npz', allow_pickle=True)
 keypoints_metadata = keypoints['metadata'].item()
 keypoints_symmetry = keypoints_metadata['keypoints_symmetry']
 kps_left, kps_right = list(keypoints_symmetry[0]), list(keypoints_symmetry[1])
@@ -118,6 +120,7 @@ joints_left, joints_right = list(dataset.skeleton().joints_left()), list(dataset
 keypoints = keypoints['positions_2d'].item()
 
 ###################
+print("check subjects in dataset...")
 for subject in dataset.subjects():
     assert subject in keypoints, 'Subject {} is missing from the 2D detections dataset'.format(subject)
     for action in dataset[subject].keys():
@@ -212,6 +215,7 @@ action_filter = None if args.actions == '*' else args.actions.split(',')
 if action_filter is not None:
     print('Selected actions:', action_filter)
 
+print("fetch dataset...")
 cameras_valid, poses_valid, poses_valid_2d = fetch(subjects_test, action_filter)
 
 # set receptive_field as number assigned
@@ -226,7 +230,7 @@ height = cam['res_h']
 num_joints = keypoints_metadata['num_joints']
 
 #########################################PoseTransformer
-
+print("build model...")
 model_pos_train =  MixSTE2(num_frame=receptive_field, num_joints=num_joints, in_chans=2, embed_dim_ratio=args.cs, depth=args.dep,
         num_heads=8, mlp_ratio=2., qkv_bias=True, qk_scale=None,drop_path_rate=0.1)
 
@@ -314,7 +318,7 @@ def eval_data_prepare(receptive_field, inputs_2d, inputs_3d):
 
 
 ###################
-
+print("Start Training...")
 # Training start
 if not args.evaluate:
     cameras_train, poses_train, poses_train_2d = fetch(subjects_train, action_filter, subset=args.subset)
@@ -370,6 +374,7 @@ if not args.evaluate:
 
         # Just train 1 time, for quick debug
         notrain=False
+        iter = 0
         for cameras_train, batch_3d, batch_2d in train_generator.next_epoch():
             # if notrain:break
             # notrain=True
@@ -437,6 +442,10 @@ if not args.evaluate:
 
             # loss_total = (loss_3d_pos[:,1:] + loss_diff)
             loss_total = loss_3d_pos + loss_diff
+
+            iter += 1
+            if not args.nolog and (0 == iter % 1000):
+                writer.add_scalar("Loss/3d training loss", loss_3d_pos, iter)
             
             loss_total.backward(loss_total.clone().detach())
 
@@ -452,15 +461,16 @@ if not args.evaluate:
         losses_3d_train.append(epoch_loss_3d_train / N)
         # torch.cuda.empty_cache()
 
-        # End-of-epoch evaluation
+        # End-of-epoch evaluation，在model.eval模式下，分别测试一下训练集和验证集
+        print(f"evaluation after train epoch {epoch}/{args.epochs}")
         with torch.no_grad():
             model_pos.load_state_dict(model_pos_train.state_dict(), strict=False)
             model_pos.eval()
 
-            epoch_loss_3d_valid = 0
-            epoch_loss_traj_valid = 0
-            epoch_loss_2d_valid = 0
-            epoch_loss_3d_vel = 0
+            epoch_loss_3d_valid = 0     # MPJPE of test set
+            epoch_loss_traj_valid = 0   # unused
+            epoch_loss_2d_valid = 0     # unused
+            epoch_loss_3d_vel = 0       # MPJVE of test set
             N = 0
             if not args.no_eval:
                 # Evaluate on test set
@@ -508,6 +518,7 @@ if not args.evaluate:
                     epoch_loss_3d_vel += inputs_3d.shape[0] * inputs_3d.shape[1] * loss_3d_vel.item()
 
 
+
                     # del inputs_3d, loss_3d_pos, predicted_3d_pos
                     # torch.cuda.empty_cache()
 
@@ -515,9 +526,9 @@ if not args.evaluate:
                 epoch_loss_3d_vel = epoch_loss_3d_vel/N
 
                 # Evaluate on training set, this time in evaluation mode
-                epoch_loss_3d_train_eval = 0
-                epoch_loss_traj_train_eval = 0
-                epoch_loss_2d_train_labeled_eval = 0
+                epoch_loss_3d_train_eval = 0                # MPJPE of training set
+                epoch_loss_traj_train_eval = 0              # unused
+                epoch_loss_2d_train_labeled_eval = 0        # unused
                 N = 0
                 for cam, batch, batch_2d in train_generator_eval.next_epoch():
                     if batch_2d.shape[1] == 0:
@@ -573,8 +584,8 @@ if not args.evaluate:
                 losses_3d_valid[-1] * 1000,
                 epoch_loss_3d_vel * 1000))
             if not args.nolog:
-                writer.add_scalar("Loss/3d training eval loss", losses_3d_train_eval[-1] * 1000, epoch+1)
-                writer.add_scalar("Loss/3d validation loss", losses_3d_valid[-1] * 1000, epoch+1)
+                writer.add_scalar("MPJPE/mpjpe of train set", losses_3d_train_eval[-1] * 1000, epoch+1)
+                writer.add_scalar("MPJPE/mpjpe of test set", losses_3d_valid[-1] * 1000, epoch+1)
         if not args.nolog:
             writer.add_scalar("Loss/3d training loss", losses_3d_train[-1] * 1000, epoch+1)
             writer.add_scalar("Parameters/learing rate", lr, epoch+1)
