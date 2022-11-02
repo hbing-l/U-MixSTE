@@ -65,6 +65,20 @@ class Mlp(nn.Module):
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., comb=False, vis=False):
+        """Attention is all you need
+
+        Args:
+            dim (_type_): _description_
+            num_heads (int, optional): _description_. Defaults to 8.
+            qkv_bias (bool, optional): _description_. Defaults to False.
+            qk_scale (_type_, optional): _description_. Defaults to None.
+            attn_drop (_type_, optional): _description_. Defaults to 0..
+            proj_drop (_type_, optional): _description_. Defaults to 0..
+            comb (bool, optional): Defaults to False.
+                True: q transpose * k. 
+                False: q * k transpose. 
+            vis (bool, optional): _description_. Defaults to False.
+        """
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -427,7 +441,7 @@ class  MixSTE2(nn.Module):
         # nn.init.kaiming_normal_(self.Spatial_pos_embed)
         # torch.nn.init.normal_(self.Spatial_pos_embed, std = .02)
 
-        self.Temporal_pos_embed = nn.Parameter(torch.zeros(1, num_frame, embed_dim))
+        self.Temporal_pos_embed = nn.Parameter(torch.zeros(1, num_frame, embed_dim)) #TODO: PoseFormer这里是 embed_dim = embed_dim_ratio * num_joints，本文实现为什么直接用 embed_dim = embed_dim_ratio ？
         # nn.init.kaiming_normal_(self.Temporal_pos_embed)
         # torch.nn.init.normal_(self.Temporal_pos_embed, std = .02)
 
@@ -470,7 +484,7 @@ class  MixSTE2(nn.Module):
         x = rearrange(x, 'b f n c  -> (b f) n c', )
         ### now x is [batch_size, receptive frames, joint_num, 2 channels]
         x = self.Spatial_patch_to_embedding(x)
-        # x = rearrange(x, 'bnew c n  -> bnew n c', )
+        # x = rearrange(x, 'bnew c n  -> bnew n c', ) # bnew = b * f
         x += self.Spatial_pos_embed
         x = self.pos_drop(x)
 
@@ -509,7 +523,7 @@ class  MixSTE2(nn.Module):
             #     x = steblock(x, vis=True)
             x = steblock(x)
             x = self.Spatial_norm(x)
-            x = rearrange(x, '(b f) n cw -> (b n) f cw', f=f)
+            x = rearrange(x, '(b f) n cw -> (b n) f cw', f=f) # rearrange joint dimension to time dimension for subsequent Temporal Transformation
 
             # x += self.Temporal_pos_embed
             # x = self.pos_drop(x)
@@ -518,7 +532,7 @@ class  MixSTE2(nn.Module):
             #     exit()
             x = tteblock(x)
             x = self.Temporal_norm(x)
-            x = rearrange(x, '(b n) f cw -> b f n cw', n=n)
+            x = rearrange(x, '(b n) f cw -> b f n cw', n=n) # rearrange time dimension to joint dimension for subsequent Spatial Transformation
         
         # x = rearrange(x, 'b f n cw -> (b n) f cw', n=n)
         # x = self.weighted_mean(x)
