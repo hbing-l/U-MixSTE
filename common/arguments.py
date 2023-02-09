@@ -12,8 +12,8 @@ def parse_args():
 
     # General arguments
     parser.add_argument('-d', '--dataset', default='h36m', type=str, metavar='NAME', help='target dataset') # h36m or humaneva
-    parser.add_argument('-dp', '--data_root', default='data', type=str, help='target dataset root dir') # h36m or humaneva
-    parser.add_argument('-k', '--keypoints', default='cpn_ft_h36m_dbb', type=str, metavar='NAME', help='2D keypoints to use')
+    parser.add_argument('-dp', '--data_root', default='/home/aixi.lhb/HPE/MixSTE_1/data', type=str, help='target dataset root dir') # h36m or humaneva
+    parser.add_argument('-k', '--keypoints', default='gt', type=str, metavar='NAME', help='2D keypoints to use')
     parser.add_argument('-str', '--subjects-train', default='S1,S5,S6,S7,S8', type=str, metavar='LIST',
                         help='training subjects separated by comma')
     parser.add_argument('-ste', '--subjects-test', default='S9,S11', type=str, metavar='LIST', help='test subjects separated by comma')
@@ -37,7 +37,7 @@ def parse_args():
 
 
     # Model arguments
-    parser.add_argument('-s', '--stride', default=1, type=int, metavar='N', help='chunk size to use during training')
+    parser.add_argument('-s', '--stride', default=243, type=int, metavar='N', help='chunk size to use during training')
     parser.add_argument('-e', '--epochs', default=120, type=int, metavar='N', help='number of training epochs')
     parser.add_argument('-b', '--batch-size', default=1024, type=int, metavar='N', help='batch size in terms of predicted frames')
     parser.add_argument('-drop', '--dropout', default=0., type=float, metavar='P', help='dropout probability')

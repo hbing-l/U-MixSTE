@@ -353,6 +353,85 @@ class Block(nn.Module):
             x = rearrange(x, 'b c t -> b t c')
         return x
 
+class CFFN(nn.Module):
+    def __init__(self, dim, k_size=3, stride=1, dropout=0.1, downsample=True):
+        super().__init__()
+        
+        if downsample:
+            self.w_1 = nn.Conv1d(dim, dim*2, kernel_size=1, stride=1, groups=dim)
+            self.w_2 = nn.Conv1d(dim*2, dim, kernel_size=k_size, stride=stride, groups=dim)
+        else:
+            self.w_1 = nn.ConvTranspose1d(dim, dim*2, kernel_size=1, stride=1, groups=dim)
+            self.w_2 = nn.ConvTranspose1d(dim*2, dim, kernel_size=k_size, stride=stride, groups=dim)
+        
+        self.gelu = nn.ReLU()
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        
+        x = x.permute(0, 2, 1)
+        x = self.w_2(self.dropout(self.gelu(self.w_1(x))))
+        x = x.permute(0, 2, 1)
+        
+        return x
+
+
+class StridedBlock(nn.Module):
+
+    def __init__(self, dim, num_heads, mlp_ratio=4., attention=Attention, qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, comb=False, changedim=False, currentdim=0, depth=0, vis=False, k_size=3, stride=1, frame=243, pool_ratio=2, downsample=True):
+        super().__init__()
+
+        self.changedim = changedim
+        self.currentdim = currentdim
+        self.depth = depth
+        if self.changedim:
+            assert self.depth>0
+
+        self.norm1 = norm_layer(dim)
+        self.attn = attention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, comb=comb, vis=vis)
+        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        self.cffn = CFFN(dim=dim, k_size=k_size, stride=stride, dropout=drop, downsample=downsample)
+        self.apool = nn.AdaptiveAvgPool1d(frame // pool_ratio)
+        self.downsample = downsample
+        self.f = frame
+        self.r = pool_ratio
+        self.s = stride
+        
+        if self.changedim and self.currentdim < self.depth//2:
+            self.reduction = nn.Conv1d(dim, dim//2, kernel_size=1)
+            # self.reduction = nn.Linear(dim, dim//2)
+        elif self.changedim and depth > self.currentdim > self.depth//2:
+            self.improve = nn.Conv1d(dim, dim*2, kernel_size=1)
+            # self.improve = nn.Linear(dim, dim*2)
+        self.vis = vis
+
+    def forward(self, x, vis=False):
+        x = x + self.drop_path(self.attn(self.norm1(x), vis=vis))
+        if self.s == 1:
+            x = x + self.drop_path(self.cffn(self.norm2(x)))
+        else:
+            if self.downsample:
+                x_ = x.permute(0, 2, 1)
+                x = self.apool(x_).permute(0, 2, 1) + self.drop_path(self.cffn(self.norm2(x)))
+            else:
+                x_ = x.permute(0, 2, 1)
+                x = F.interpolate(x_, size=self.f // self.r, mode='linear', align_corners=True).permute(0, 2, 1) + self.drop_path(self.cffn(self.norm2(x)))
+            
+        if self.changedim and self.currentdim < self.depth//2:
+            x = rearrange(x, 'b t c -> b c t')
+            x = self.reduction(x)
+            x = rearrange(x, 'b c t -> b t c')
+        elif self.changedim and self.depth > self.currentdim > self.depth//2:
+            x = rearrange(x, 'b t c -> b c t')
+            x = self.improve(x)
+            x = rearrange(x, 'b c t -> b t c')
+        return x
+
 class TemporalBlock(nn.Module):
     
     def __init__(self, dim, num_heads, mlp_ratio=4., attention=Attention, qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
@@ -450,7 +529,11 @@ class  MixSTE2(nn.Module):
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.block_depth = depth
-
+        kernel_size = [3, 3, 2, 1, 2, 3, 3]
+        stride = [2, 2, 2, 1, 2, 2, 2]
+        pool_ratio = [2, 4, 8, 8, 4, 2, 1]
+        downsample = [True, True, True, True, False, False, False]
+        
         self.STEblocks = nn.ModuleList([
             # Block: Attention Block
             Block(
@@ -461,9 +544,14 @@ class  MixSTE2(nn.Module):
         self.TTEblocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, comb=False, changedim=False, currentdim=i+1, depth=depth)
-            for i in range(depth)])
-
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[0], norm_layer=norm_layer, comb=False, changedim=False, currentdim=1, depth=depth)])
+        
+        self.STTEblocks = nn.ModuleList([
+            StridedBlock(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, comb=False, changedim=False, currentdim=i+1, depth=depth, k_size=kernel_size[i-1], stride=stride[i-1], frame=num_frame, pool_ratio=pool_ratio[i-1], downsample=downsample[i-1])
+            for i in range(1, depth)])
+        
         self.Spatial_norm = norm_layer(embed_dim_ratio)
         self.Temporal_norm = norm_layer(embed_dim)
 
@@ -509,13 +597,14 @@ class  MixSTE2(nn.Module):
         x = self.Temporal_norm(x)
         return x
 
-    def ST_foward(self, x):
+    def ST_foward(self, x, x_list):
         assert len(x.shape)==4, "shape is equal to 4"
-        b, f, n, cw = x.shape
+        
         for i in range(1, self.block_depth):
+            b, f, n, cw = x.shape
             x = rearrange(x, 'b f n cw -> (b f) n cw')
             steblock = self.STEblocks[i]
-            tteblock = self.TTEblocks[i]
+            tteblock = self.STTEblocks[i-1]
             
             # x += self.Spatial_pos_embed
             # x = self.pos_drop(x)
@@ -533,7 +622,12 @@ class  MixSTE2(nn.Module):
             x = tteblock(x)
             x = self.Temporal_norm(x)
             x = rearrange(x, '(b n) f cw -> b f n cw', n=n) # rearrange time dimension to joint dimension for subsequent Spatial Transformation
-        
+            
+            x_list.append(x)
+            
+            if i > 4:
+                x += x_list[7-i]
+            
         # x = rearrange(x, 'b f n cw -> (b n) f cw', n=n)
         # x = self.weighted_mean(x)
         # x = rearrange(x, '(b n) f cw -> b f n cw', n=n)
@@ -555,11 +649,14 @@ class  MixSTE2(nn.Module):
         x = self.TTE_foward(x)
         # et = time.time()
         # print('TTE_foward  ', (et-st)*2000)
-
+        
+        x_list = []
         # now x shape is (b n) f cw
         x = rearrange(x, '(b n) f cw -> b f n cw', n=n)
         # st = time.time()
-        x = self.ST_foward(x)
+        x_list.append(x)
+        
+        x = self.ST_foward(x, x_list)
         # et = time.time()
         # print('ST_foward  ', (et-st)*2000)
 
