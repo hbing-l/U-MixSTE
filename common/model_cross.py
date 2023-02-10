@@ -24,8 +24,10 @@ from common.rela import RectifiedLinearAttention
 # from common.linearattention import LinearMultiheadAttention
 
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., changedim=False, currentdim=0, depth=0):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., changedim=False, currentdim=0, depth=0, downsample=False, in_frames=243, hidden_frames=243, out_frames=121):
         super().__init__()
+        self.downsample = downsample
+        
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         # self.changedim = changedim
@@ -33,33 +35,47 @@ class Mlp(nn.Module):
         # self.depth = depth
         # if self.changedim:
         #     assert self.depth>0
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        # nn.init.kaiming_normal_(self.fc1.weight)
-        # torch.nn.init.xavier_uniform_(self.fc1.weight)
-        # torch.nn.init.normal_(self.fc1.bias, std = 1e-6)
         
-        self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
-        # nn.init.kaiming_normal_(self.fc2.weight)
-        # torch.nn.init.xavier_uniform_(self.fc2.weight)
-        # torch.nn.init.normal_(self.fc2.bias, std = 1e-6)
+        if not self.downsample:
+            self.fc1 = nn.Linear(in_features, hidden_features)
+            # nn.init.kaiming_normal_(self.fc1.weight)
+            # torch.nn.init.xavier_uniform_(self.fc1.weight)
+            # torch.nn.init.normal_(self.fc1.bias, std = 1e-6)
+            
+            self.act = act_layer()
+            self.fc2 = nn.Linear(hidden_features, out_features)
+            # nn.init.kaiming_normal_(self.fc2.weight)
+            # torch.nn.init.xavier_uniform_(self.fc2.weight)
+            # torch.nn.init.normal_(self.fc2.bias, std = 1e-6)
+            
+            self.drop = nn.Dropout(drop)
+            # if self.changedim and self.currentdim <= self.depth//2:
+            #     self.reduction = nn.Linear(out_features, out_features//2)
+            # elif self.changedim and self.currentdim > self.depth//2:
+            #     self.improve = nn.Linear(out_features, out_features*2)
         
-        self.drop = nn.Dropout(drop)
-        # if self.changedim and self.currentdim <= self.depth//2:
-        #     self.reduction = nn.Linear(out_features, out_features//2)
-        # elif self.changedim and self.currentdim > self.depth//2:
-        #     self.improve = nn.Linear(out_features, out_features*2)
+        else:
+            self.fc1 = nn.Linear(in_frames, hidden_frames)
+            self.act = act_layer()
+            self.fc2 = nn.Linear(hidden_frames, out_frames)
+            self.drop = nn.Dropout(drop)
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        # if self.changedim and self.currentdim <= self.depth//2:
-        #     x = self.reduction(x)
-        # elif self.changedim and self.currentdim > self.depth//2:
-        #     x = self.improve(x)
+        if not self.downsample:
+            x = self.fc1(x)
+            x = self.act(x)
+            x = self.drop(x)
+            x = self.fc2(x)
+            x = self.drop(x)
+        else:
+            x = x.permute(0, 2, 1)
+            x = self.fc1(x)
+            x = self.act(x)
+            x = self.drop(x)
+            x = self.fc2(x)
+            x = self.drop(x)
+            x = x.permute(0, 2, 1)
+            
         return x
 
 
@@ -313,9 +329,14 @@ class ProbAttention(nn.Module):
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., attention=Attention, qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, comb=False, changedim=False, currentdim=0, depth=0, vis=False):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, comb=False, changedim=False, currentdim=0, depth=0, vis=False, downsample=False, in_frames=243, hidden_frames=243, out_frames=121):
         super().__init__()
 
+        self.in_frames = in_frames
+        self.out_frames = out_frames
+        self.downsample = downsample
+        self.apool = nn.AdaptiveAvgPool1d(out_frames)
+        
         self.changedim = changedim
         self.currentdim = currentdim
         self.depth = depth
@@ -329,7 +350,7 @@ class Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, downsample=downsample, in_frames=in_frames, hidden_frames=hidden_frames, out_frames=out_frames)
         
         if self.changedim and self.currentdim < self.depth//2:
             self.reduction = nn.Conv1d(dim, dim//2, kernel_size=1)
@@ -341,87 +362,17 @@ class Block(nn.Module):
 
     def forward(self, x, vis=False):
         x = x + self.drop_path(self.attn(self.norm1(x), vis=vis))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        
-        if self.changedim and self.currentdim < self.depth//2:
-            x = rearrange(x, 'b t c -> b c t')
-            x = self.reduction(x)
-            x = rearrange(x, 'b c t -> b t c')
-        elif self.changedim and self.depth > self.currentdim > self.depth//2:
-            x = rearrange(x, 'b t c -> b c t')
-            x = self.improve(x)
-            x = rearrange(x, 'b c t -> b t c')
-        return x
-
-class CFFN(nn.Module):
-    def __init__(self, dim, k_size=3, stride=1, dropout=0.1, downsample=True):
-        super().__init__()
-        
-        if downsample:
-            self.w_1 = nn.Conv1d(dim, dim*2, kernel_size=1, stride=1, groups=dim)
-            self.w_2 = nn.Conv1d(dim*2, dim, kernel_size=k_size, stride=stride, groups=dim)
+        if (self.in_frames == self.out_frames) or (not self.downsample):
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
         else:
-            self.w_1 = nn.ConvTranspose1d(dim, dim*2, kernel_size=1, stride=1, groups=dim)
-            self.w_2 = nn.ConvTranspose1d(dim*2, dim, kernel_size=k_size, stride=stride, groups=dim)
-        
-        self.gelu = nn.ReLU()
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        
-        x = x.permute(0, 2, 1)
-        x = self.w_2(self.dropout(self.gelu(self.w_1(x))))
-        x = x.permute(0, 2, 1)
-        
-        return x
-
-
-class StridedBlock(nn.Module):
-
-    def __init__(self, dim, num_heads, mlp_ratio=4., attention=Attention, qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, comb=False, changedim=False, currentdim=0, depth=0, vis=False, k_size=3, stride=1, frame=243, pool_ratio=2, downsample=True):
-        super().__init__()
-
-        self.changedim = changedim
-        self.currentdim = currentdim
-        self.depth = depth
-        if self.changedim:
-            assert self.depth>0
-
-        self.norm1 = norm_layer(dim)
-        self.attn = attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, comb=comb, vis=vis)
-        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        self.cffn = CFFN(dim=dim, k_size=k_size, stride=stride, dropout=drop, downsample=downsample)
-        self.apool = nn.AdaptiveAvgPool1d(frame // pool_ratio)
-        self.downsample = downsample
-        self.f = frame
-        self.r = pool_ratio
-        self.s = stride
-        
-        if self.changedim and self.currentdim < self.depth//2:
-            self.reduction = nn.Conv1d(dim, dim//2, kernel_size=1)
-            # self.reduction = nn.Linear(dim, dim//2)
-        elif self.changedim and depth > self.currentdim > self.depth//2:
-            self.improve = nn.Conv1d(dim, dim*2, kernel_size=1)
-            # self.improve = nn.Linear(dim, dim*2)
-        self.vis = vis
-
-    def forward(self, x, vis=False):
-        x = x + self.drop_path(self.attn(self.norm1(x), vis=vis))
-        if self.s == 1:
-            x = x + self.drop_path(self.cffn(self.norm2(x)))
-        else:
-            if self.downsample:
+            if self.in_frames > self.out_frames:
                 x_ = x.permute(0, 2, 1)
-                x = self.apool(x_).permute(0, 2, 1) + self.drop_path(self.cffn(self.norm2(x)))
+                x = self.apool(x_).permute(0, 2, 1) + self.drop_path(self.mlp(self.norm2(x)))
             else:
                 x_ = x.permute(0, 2, 1)
-                x = F.interpolate(x_, size=self.f // self.r, mode='linear', align_corners=True).permute(0, 2, 1) + self.drop_path(self.cffn(self.norm2(x)))
+                x = F.interpolate(x_, size=self.out_frames, mode='linear', align_corners=True).permute(0, 2, 1) + self.drop_path(self.mlp(self.norm2(x)))
             
+        
         if self.changedim and self.currentdim < self.depth//2:
             x = rearrange(x, 'b t c -> b c t')
             x = self.reduction(x)
@@ -529,10 +480,13 @@ class  MixSTE2(nn.Module):
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.block_depth = depth
-        kernel_size = [3, 3, 2, 1, 2, 3, 3]
-        stride = [2, 2, 2, 1, 2, 2, 2]
-        pool_ratio = [2, 4, 8, 8, 4, 2, 1]
-        downsample = [True, True, True, True, False, False, False]
+        downsample_list = [False]
+        for i in range(depth-1):
+            downsample_list.append(True)
+        
+        in_frames = [243, 243, 121, 60, 30, 30, 60, 121]
+        hidden_frames = in_frames
+        out_frames = [243, 121, 60, 30, 30, 60, 121, 243]
         
         self.STEblocks = nn.ModuleList([
             # Block: Attention Block
@@ -544,14 +498,9 @@ class  MixSTE2(nn.Module):
         self.TTEblocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[0], norm_layer=norm_layer, comb=False, changedim=False, currentdim=1, depth=depth)])
-        
-        self.STTEblocks = nn.ModuleList([
-            StridedBlock(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, comb=False, changedim=False, currentdim=i+1, depth=depth, k_size=kernel_size[i-1], stride=stride[i-1], frame=num_frame, pool_ratio=pool_ratio[i-1], downsample=downsample[i-1])
-            for i in range(1, depth)])
-        
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, comb=False, changedim=False, currentdim=i+1, depth=depth, downsample=downsample_list[i], in_frames=in_frames[i], hidden_frames=hidden_frames[i], out_frames=out_frames[i])
+            for i in range(depth)])
+
         self.Spatial_norm = norm_layer(embed_dim_ratio)
         self.Temporal_norm = norm_layer(embed_dim)
 
@@ -604,7 +553,7 @@ class  MixSTE2(nn.Module):
             b, f, n, cw = x.shape
             x = rearrange(x, 'b f n cw -> (b f) n cw')
             steblock = self.STEblocks[i]
-            tteblock = self.STTEblocks[i-1]
+            tteblock = self.TTEblocks[i]
             
             # x += self.Spatial_pos_embed
             # x = self.pos_drop(x)
@@ -622,12 +571,12 @@ class  MixSTE2(nn.Module):
             x = tteblock(x)
             x = self.Temporal_norm(x)
             x = rearrange(x, '(b n) f cw -> b f n cw', n=n) # rearrange time dimension to joint dimension for subsequent Spatial Transformation
-            
+
             x_list.append(x)
             
             if i > 4:
                 x += x_list[7-i]
-            
+                
         # x = rearrange(x, 'b f n cw -> (b n) f cw', n=n)
         # x = self.weighted_mean(x)
         # x = rearrange(x, '(b n) f cw -> b f n cw', n=n)
@@ -649,7 +598,7 @@ class  MixSTE2(nn.Module):
         x = self.TTE_foward(x)
         # et = time.time()
         # print('TTE_foward  ', (et-st)*2000)
-        
+
         x_list = []
         # now x shape is (b n) f cw
         x = rearrange(x, '(b n) f cw -> b f n cw', n=n)
