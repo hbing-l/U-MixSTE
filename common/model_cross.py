@@ -24,7 +24,7 @@ from common.rela import RectifiedLinearAttention
 # from common.linearattention import LinearMultiheadAttention
 
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., changedim=False, currentdim=0, depth=0, downsample=False, in_frames=243, hidden_frames=243, out_frames=121):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., changedim=False, currentdim=0, depth=0, downsample=False, in_frames=243, out_frames=121):
         super().__init__()
         self.downsample = downsample
         
@@ -36,43 +36,35 @@ class Mlp(nn.Module):
         # if self.changedim:
         #     assert self.depth>0
         
-        if not self.downsample:
-            self.fc1 = nn.Linear(in_features, hidden_features)
-            # nn.init.kaiming_normal_(self.fc1.weight)
-            # torch.nn.init.xavier_uniform_(self.fc1.weight)
-            # torch.nn.init.normal_(self.fc1.bias, std = 1e-6)
-            
-            self.act = act_layer()
-            self.fc2 = nn.Linear(hidden_features, out_features)
-            # nn.init.kaiming_normal_(self.fc2.weight)
-            # torch.nn.init.xavier_uniform_(self.fc2.weight)
-            # torch.nn.init.normal_(self.fc2.bias, std = 1e-6)
-            
-            self.drop = nn.Dropout(drop)
-            # if self.changedim and self.currentdim <= self.depth//2:
-            #     self.reduction = nn.Linear(out_features, out_features//2)
-            # elif self.changedim and self.currentdim > self.depth//2:
-            #     self.improve = nn.Linear(out_features, out_features*2)
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        # nn.init.kaiming_normal_(self.fc1.weight)
+        # torch.nn.init.xavier_uniform_(self.fc1.weight)
+        # torch.nn.init.normal_(self.fc1.bias, std = 1e-6)
         
-        else:
-            self.fc1 = nn.Linear(in_frames, hidden_frames)
-            self.act = act_layer()
-            self.fc2 = nn.Linear(hidden_frames, out_frames)
-            self.drop = nn.Dropout(drop)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        # nn.init.kaiming_normal_(self.fc2.weight)
+        # torch.nn.init.xavier_uniform_(self.fc2.weight)
+        # torch.nn.init.normal_(self.fc2.bias, std = 1e-6)
+        
+        self.drop = nn.Dropout(drop)
+        # if self.changedim and self.currentdim <= self.depth//2:
+        #     self.reduction = nn.Linear(out_features, out_features//2)
+        # elif self.changedim and self.currentdim > self.depth//2:
+        #     self.improve = nn.Linear(out_features, out_features*2)
+        
+        self.fc3 = nn.Linear(in_frames, out_frames)
 
     def forward(self, x):
-        if not self.downsample:
-            x = self.fc1(x)
-            x = self.act(x)
-            x = self.drop(x)
-            x = self.fc2(x)
-            x = self.drop(x)
-        else:
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        
+        if self.downsample:
             x = x.permute(0, 2, 1)
-            x = self.fc1(x)
-            x = self.act(x)
-            x = self.drop(x)
-            x = self.fc2(x)
+            x = self.fc3(x)
             x = self.drop(x)
             x = x.permute(0, 2, 1)
             
@@ -138,7 +130,11 @@ class Attention(nn.Module):
             # 逆卷积
             # self.up4 = nn.ConvTranspose1d(dim, dim, 2, stride=2)
             # self.up5 = nn.ConvTranspose1d(dim, dim, 2, stride=2, output_padding=1)
-    
+            self.up1 = nn.ConvTranspose1d(dim, dim, kernel_size=k[2], stride=2, groups=dim)
+            self.up2 = nn.ConvTranspose1d(dim, dim, kernel_size=k[1], stride=2, groups=dim)
+            self.up3 = nn.ConvTranspose1d(dim, dim, kernel_size=k[0], stride=2, groups=dim)
+        
+            
     def calculatex(self, x, q):
         B, N, C = x.shape
         
@@ -180,7 +176,11 @@ class Attention(nn.Module):
             c3 = self.conv3(c2+p2)
             p3 = self.pool3(x_)
             
-            x_red = c3 + p3
+            up1 = self.up1(c3+p3)
+            up2 = self.up2(up1+c2+p2)
+            up3 = self.up3(up2+c1+p1)
+            
+            x_red = up3 + x_
             
             kv = x_red.reshape(B, C, -1).permute(0, 2, 1)
             kv = self.norm4(kv) 
@@ -402,7 +402,7 @@ class ProbAttention(nn.Module):
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., attention=Attention, qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, comb=False, changedim=False, currentdim=0, depth=0, vis=False, downsample=False, in_frames=243, hidden_frames=243, out_frames=121, multiscale = False):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, comb=False, changedim=False, currentdim=0, depth=0, vis=False, downsample=False, in_frames=243, out_frames=121, multiscale = False):
         super().__init__()
 
         self.in_frames = in_frames
@@ -423,7 +423,7 @@ class Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, downsample=downsample, in_frames=in_frames, hidden_frames=hidden_frames, out_frames=out_frames)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, downsample=downsample, in_frames=in_frames, out_frames=out_frames)
         
         if self.changedim and self.currentdim < self.depth//2:
             self.reduction = nn.Conv1d(dim, dim//2, kernel_size=1)
@@ -558,7 +558,6 @@ class  MixSTE2(nn.Module):
             downsample_list.append(True)
         
         in_frames = [243, 243, 121, 60, 30, 30, 60, 121]
-        hidden_frames = in_frames
         out_frames = [243, 121, 60, 30, 30, 60, 121, 243]
         
         self.STEblocks = nn.ModuleList([
@@ -571,7 +570,7 @@ class  MixSTE2(nn.Module):
         self.TTEblocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, comb=False, changedim=False, currentdim=i+1, depth=depth, multiscale = True, downsample=downsample_list[i], in_frames=in_frames[i], hidden_frames=hidden_frames[i], out_frames=out_frames[i])
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, comb=False, changedim=False, currentdim=i+1, depth=depth, multiscale = True, downsample=downsample_list[i], in_frames=in_frames[i], out_frames=out_frames[i])
             for i in range(depth)])
 
         self.Spatial_norm = norm_layer(embed_dim_ratio)
