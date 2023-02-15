@@ -80,7 +80,7 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., comb=False, vis=False):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., comb=False, vis=False, reduction=False, in_frames=243, out_frames=243):
         """Attention is all you need
 
         Args:
@@ -101,7 +101,8 @@ class Attention(nn.Module):
         # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
         self.scale = qk_scale or head_dim ** -0.5
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
         # nn.init.kaiming_normal_(self.qkv.weight)
         # torch.nn.init.xavier_uniform_(self.qkv.weight)
         # torch.nn.init.zeros_(self.qkv.bias)
@@ -115,16 +116,40 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.comb = comb
         self.vis = vis
-
-    def forward(self, x, vis=False):
+        
+        self.reduction = reduction
+        if self.reduction == True:
+            if in_frames == 243:
+                k = [3, 3, 2]
+            elif in_frames == 121:
+                k = [3, 2, 2]
+            elif in_frames == 60:
+                k = [2, 2, 3]
+            else:
+                k = [2, 3, 3]
+            
+            self.conv1 = nn.Conv1d(dim, dim, kernel_size=k[0], stride=2, groups=dim)
+            self.pool1 = nn.AdaptiveAvgPool1d(in_frames // 2)
+            self.conv2 = nn.Conv1d(dim, dim, kernel_size=k[1], stride=2, groups=dim)
+            self.pool2 = nn.AdaptiveAvgPool1d(in_frames // 4)
+            self.conv3 = nn.Conv1d(dim, dim, kernel_size=k[2], stride=2, groups=dim)
+            self.pool3 = nn.AdaptiveAvgPool1d(in_frames // 8)
+            self.norm4 = nn.LayerNorm(dim)
+            # 逆卷积
+            # self.up4 = nn.ConvTranspose1d(dim, dim, 2, stride=2)
+            # self.up5 = nn.ConvTranspose1d(dim, dim, 2, stride=2, output_padding=1)
+    
+    def calculatex(self, x, q):
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        # Now x shape (3, B, heads, N, C//heads)
-        q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
+        
+        kv = self.kv(x).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]  # (17, 8, 52, 64) -> (17, 8, 12, 64) -> (17, 8, 4, 64)
+        
         if self.comb==True:
             attn = (q.transpose(-2, -1) @ k) * self.scale
         elif self.comb==False:
             attn = (q @ k.transpose(-2, -1)) * self.scale
+        
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
         
@@ -134,9 +159,57 @@ class Attention(nn.Module):
             x = rearrange(x, 'B H N C -> B N (H C)')
             # print(x.shape)
         elif self.comb==False:
-            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
+            x = (attn @ v).transpose(1, 2).reshape(B, -1, C)
+         
+        return x 
+
+    def forward(self, x, vis=False):
+        B, N, C = x.shape
+        q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+
+        # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        # Now x shape (3, B, heads, N, C//heads)
+        # q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
+        if self.reduction == True:
+            x_ = x.permute(0, 2, 1)
+            
+            c1 = self.conv1(x_)
+            p1 = self.pool1(x_)
+            c2 = self.conv2(c1+p1)
+            p2 = self.pool2(x_)
+            c3 = self.conv3(c2+p2)
+            p3 = self.pool3(x_)
+            
+            x_red = c3 + p3
+            
+            kv = x_red.reshape(B, C, -1).permute(0, 2, 1)
+            kv = self.norm4(kv) 
+            x = self.calculatex(kv, q)
+            
+            x = self.proj(x)
+            x = self.proj_drop(x)
+        
+        else:
+            
+            kv = self.kv(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            k, v = kv[0], kv[1]
+            
+            if self.comb==True:
+                attn = (q.transpose(-2, -1) @ k) * self.scale
+            elif self.comb==False:
+                attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            
+            if self.comb==True:
+                x = (attn @ v.transpose(-2, -1)).transpose(-2, -1)
+                # print(x.shape)
+                x = rearrange(x, 'B H N C -> B N (H C)')
+                # print(x.shape)
+            elif self.comb==False:
+                x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+            x = self.proj(x)
+            x = self.proj_drop(x)
         return x
 
 class TemporalAttention(nn.Module):
@@ -329,7 +402,7 @@ class ProbAttention(nn.Module):
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., attention=Attention, qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, comb=False, changedim=False, currentdim=0, depth=0, vis=False, downsample=False, in_frames=243, hidden_frames=243, out_frames=121):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, comb=False, changedim=False, currentdim=0, depth=0, vis=False, downsample=False, in_frames=243, hidden_frames=243, out_frames=121, multiscale = False):
         super().__init__()
 
         self.in_frames = in_frames
@@ -345,7 +418,7 @@ class Block(nn.Module):
 
         self.norm1 = norm_layer(dim)
         self.attn = attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, comb=comb, vis=vis)
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, comb=comb, vis=vis, reduction=multiscale, in_frames=in_frames, out_frames=out_frames)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -498,7 +571,7 @@ class  MixSTE2(nn.Module):
         self.TTEblocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, comb=False, changedim=False, currentdim=i+1, depth=depth, downsample=downsample_list[i], in_frames=in_frames[i], hidden_frames=hidden_frames[i], out_frames=out_frames[i])
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, comb=False, changedim=False, currentdim=i+1, depth=depth, multiscale = True, downsample=downsample_list[i], in_frames=in_frames[i], hidden_frames=hidden_frames[i], out_frames=out_frames[i])
             for i in range(depth)])
 
         self.Spatial_norm = norm_layer(embed_dim_ratio)
