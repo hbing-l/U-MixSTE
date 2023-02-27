@@ -120,20 +120,32 @@ class Attention(nn.Module):
             else:
                 k = [2, 3, 3]
             
-            self.conv1 = nn.Conv1d(dim, dim, kernel_size=k[0], stride=2, groups=dim)
+            # self.conv1 = nn.Conv1d(dim, dim, kernel_size=3, stride=2, groups=dim)
             self.pool1 = nn.AdaptiveAvgPool1d(in_frames // 2)
-            self.conv2 = nn.Conv1d(dim, dim, kernel_size=k[1], stride=2, groups=dim)
+            self.norm1 = nn.LayerNorm(in_frames // 2)
+            self.act1 = nn.GELU()
+            # self.conv2 = nn.Conv1d(dim, dim, kernel_size=3, stride=2, groups=dim)
             self.pool2 = nn.AdaptiveAvgPool1d(in_frames // 4)
-            self.conv3 = nn.Conv1d(dim, dim, kernel_size=k[2], stride=2, groups=dim)
+            self.norm2 = nn.LayerNorm(in_frames // 4)
+            self.act2 = nn.GELU()
+            # self.conv3 = nn.Conv1d(dim, dim, kernel_size=2, stride=2, groups=dim)
             self.pool3 = nn.AdaptiveAvgPool1d(in_frames // 8)
+            self.norm3 = nn.LayerNorm(in_frames // 8)
+            self.act3 = nn.GELU()
+            
             self.norm4 = nn.LayerNorm(dim)
             # 逆卷积
-            # self.up4 = nn.ConvTranspose1d(dim, dim, 2, stride=2)
-            # self.up5 = nn.ConvTranspose1d(dim, dim, 2, stride=2, output_padding=1)
             self.up1 = nn.ConvTranspose1d(dim, dim, kernel_size=k[2], stride=2, groups=dim)
+            self.upnorm1 = nn.LayerNorm(in_frames // 4)
+            self.upact1 = nn.GELU()
+            
             self.up2 = nn.ConvTranspose1d(dim, dim, kernel_size=k[1], stride=2, groups=dim)
+            self.upnorm2 = nn.LayerNorm(in_frames // 2)
+            self.upact2 = nn.GELU()
+            
             self.up3 = nn.ConvTranspose1d(dim, dim, kernel_size=k[0], stride=2, groups=dim)
-        
+            self.upnorm3 = nn.LayerNorm(in_frames)
+            self.upact3 = nn.GELU()
             
     def calculatex(self, x, q):
         B, N, C = x.shape
@@ -169,18 +181,15 @@ class Attention(nn.Module):
         if self.reduction == True:
             x_ = x.permute(0, 2, 1)
             
-            c1 = self.conv1(x_)
-            p1 = self.pool1(x_)
-            c2 = self.conv2(c1+p1)
-            p2 = self.pool2(x_)
-            c3 = self.conv3(c2+p2)
-            p3 = self.pool3(x_)
+            p1 = self.act1(self.norm1(self.pool1(x_)))
+            p2 = self.act2(self.norm2(self.pool2(p1)))
+            p3 = self.act3(self.norm3(self.pool3(p2)))
             
-            up1 = self.up1(c3+p3)
-            up2 = self.up2(up1+c2+p2)
-            up3 = self.up3(up2+c1+p1)
-            
-            x_red = up3 + x_
+            c1 = self.upact1(self.upnorm1(self.up1(p3)))
+            c2 = self.upact2(self.upnorm2(self.up2(c1+p2)))
+            c3 = self.upact3(self.upnorm3(self.up3(c2+p1)))
+
+            x_red = c3 + x_
             
             kv = x_red.reshape(B, C, -1).permute(0, 2, 1)
             kv = self.norm4(kv) 
