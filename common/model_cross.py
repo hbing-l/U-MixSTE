@@ -101,38 +101,38 @@ class Attention(nn.Module):
         self.comb = comb
         self.vis = vis
         
-        self.pool1 = nn.AdaptiveAvgPool1d(243 // 8)
+        self.pool4 = nn.AdaptiveAvgPool1d(243 // 8)
         
-        self.pool2 = nn.AdaptiveAvgPool1d(243 // 8)
+        self.pool5 = nn.AdaptiveAvgPool1d(243 // 8)
+        self.lambd = nn.Parameter(torch.zeros(1, 243, 1))
         
         self.reduction = reduction
-        if self.reduction == True:
             
-            self.pool1 = nn.AdaptiveAvgPool1d(243 // 2)
-            self.norm1 = nn.LayerNorm(243 // 2)
-            self.act1 = nn.GELU()
-            # self.conv2 = nn.Conv1d(dim, dim, kernel_size=3, stride=2, groups=dim)
-            self.pool2 = nn.AdaptiveAvgPool1d(243 // 4)
-            self.norm2 = nn.LayerNorm(243 // 4)
-            self.act2 = nn.GELU()
-            # self.conv3 = nn.Conv1d(dim, dim, kernel_size=2, stride=2, groups=dim)
-            self.pool3 = nn.AdaptiveAvgPool1d(243 // 8)
-            self.norm3 = nn.LayerNorm(243 // 8)
-            self.act3 = nn.GELU()
-            
-            self.norm4 = nn.LayerNorm(dim)
-            # 逆卷积
-            self.up1 = nn.ConvTranspose1d(dim, dim, kernel_size=2, stride=2, groups=dim)
-            self.upnorm1 = nn.LayerNorm(243 // 4)
-            self.upact1 = nn.GELU()
-            
-            self.up2 = nn.ConvTranspose1d(dim, dim, kernel_size=3, stride=2, groups=dim)
-            self.upnorm2 = nn.LayerNorm(243 // 2)
-            self.upact2 = nn.GELU()
-            
-            self.up3 = nn.ConvTranspose1d(dim, dim, kernel_size=3, stride=2, groups=dim)
-            self.upnorm3 = nn.LayerNorm(243)
-            self.upact3 = nn.GELU()
+        self.pool1 = nn.AdaptiveAvgPool1d(243 // 2)
+        self.norm1 = nn.LayerNorm(243 // 2)
+        self.act1 = nn.GELU()
+        # self.conv2 = nn.Conv1d(dim, dim, kernel_size=3, stride=2, groups=dim)
+        self.pool2 = nn.AdaptiveAvgPool1d(243 // 4)
+        self.norm2 = nn.LayerNorm(243 // 4)
+        self.act2 = nn.GELU()
+        # self.conv3 = nn.Conv1d(dim, dim, kernel_size=2, stride=2, groups=dim)
+        self.pool3 = nn.AdaptiveAvgPool1d(243 // 8)
+        self.norm3 = nn.LayerNorm(243 // 8)
+        self.act3 = nn.GELU()
+        
+        self.norm4 = nn.LayerNorm(dim)
+        # 逆卷积
+        self.up1 = nn.ConvTranspose1d(dim, dim, kernel_size=2, stride=2, groups=dim)
+        self.upnorm1 = nn.LayerNorm(243 // 4)
+        self.upact1 = nn.GELU()
+        
+        self.up2 = nn.ConvTranspose1d(dim, dim, kernel_size=3, stride=2, groups=dim)
+        self.upnorm2 = nn.LayerNorm(243 // 2)
+        self.upact2 = nn.GELU()
+        
+        self.up3 = nn.ConvTranspose1d(dim, dim, kernel_size=3, stride=2, groups=dim)
+        self.upnorm3 = nn.LayerNorm(243)
+        self.upact3 = nn.GELU()
     
     def calculatex(self, x, q):
         B, N, C = x.shape
@@ -184,43 +184,78 @@ class Attention(nn.Module):
         
         else:
             if cross_attn == True:
-                kv = self.kv(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-                k1, v1 = kv[0], kv[1]
+                # kv = self.kv(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+                # k1, v1 = kv[0], kv[1]
+                x_ = x.permute(0, 2, 1)
+                b, c, f = x_.shape
+                
+                p1 = self.act1(self.norm1(self.pool1(x_)))
+                p2 = self.act2(self.norm2(self.pool2(p1)))
+                p3 = self.act3(self.norm3(self.pool3(p2)))
+                
+                c1 = self.upact1(self.upnorm1(self.up1(p3)))
+                c2 = self.upact2(self.upnorm2(self.up2(c1+p2)))
+                c3 = self.upact3(self.upnorm3(self.up3(c2+p1)))
+                
+                x_red = c3 + x_
+                
+                kv = x_red.reshape(B, C, -1).permute(0, 2, 1)
+                kv = self.norm4(kv) 
+                x1, k1, v1 = self.calculatex(kv, q)
                 
                 b, n, f, c = k.shape
                 k_ = rearrange(k, 'b n f c -> b (n c) f', n=n)
                 v_ = rearrange(v, 'b n f c -> b (n c) f', n=n)
                 
-                k2 = self.pool1(k_)
+                k2 = self.pool4(k_)
 
                 k2 = rearrange(k2, 'b (n c) f -> b n f c', n=n)
-                k = torch.cat((k1, k2), dim=-2)
+                # k = torch.cat((k1, k2), dim=-2)
 
-                v2 = self.pool2(v_)
+                v2 = self.pool5(v_)
 
                 v2 = rearrange(v2, 'b (n c) f -> b n f c', n=n)
-                v = torch.cat((v1, v2), dim=-2)
+                # v = torch.cat((v1, v2), dim=-2)
+                
+                if self.comb==True:
+                    attn = (q.transpose(-2, -1) @ k2) * self.scale
+                elif self.comb==False:
+                    attn = (q @ k2.transpose(-2, -1)) * self.scale
+                attn = attn.softmax(dim=-1)
+                attn = self.attn_drop(attn)
+                
+                if self.comb==True:
+                    x2 = (attn @ v2.transpose(-2, -1)).transpose(-2, -1)
+                    # print(x.shape)
+                    x2 = rearrange(x2, 'B H N C -> B N (H C)')
+                    # print(x.shape)
+                elif self.comb==False:
+                    x2 = (attn @ v2).transpose(1, 2).reshape(B, N, C)
+                
+                x = x1 + self.lambd * x2
+                x = self.proj(x)
+                x = self.proj_drop(x)
                 
             else:
                 kv = self.kv(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
                 k, v = kv[0], kv[1]
                 
-            if self.comb==True:
-                attn = (q.transpose(-2, -1) @ k) * self.scale
-            elif self.comb==False:
-                attn = (q @ k.transpose(-2, -1)) * self.scale
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            
-            if self.comb==True:
-                x = (attn @ v.transpose(-2, -1)).transpose(-2, -1)
-                # print(x.shape)
-                x = rearrange(x, 'B H N C -> B N (H C)')
-                # print(x.shape)
-            elif self.comb==False:
-                x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-            x = self.proj(x)
-            x = self.proj_drop(x)
+                if self.comb==True:
+                    attn = (q.transpose(-2, -1) @ k) * self.scale
+                elif self.comb==False:
+                    attn = (q @ k.transpose(-2, -1)) * self.scale
+                attn = attn.softmax(dim=-1)
+                attn = self.attn_drop(attn)
+                
+                if self.comb==True:
+                    x = (attn @ v.transpose(-2, -1)).transpose(-2, -1)
+                    # print(x.shape)
+                    x = rearrange(x, 'B H N C -> B N (H C)')
+                    # print(x.shape)
+                elif self.comb==False:
+                    x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+                x = self.proj(x)
+                x = self.proj_drop(x)
         return x, k, v
 
 class TemporalAttention(nn.Module):
