@@ -104,7 +104,6 @@ class Attention(nn.Module):
         self.pool4 = nn.AdaptiveAvgPool1d(243 // 8)
         
         self.pool5 = nn.AdaptiveAvgPool1d(243 // 8)
-        self.lambd = nn.Parameter(torch.zeros(1, 243, 1))
         
         self.reduction = reduction
             
@@ -201,7 +200,10 @@ class Attention(nn.Module):
                 
                 kv = x_red.reshape(B, C, -1).permute(0, 2, 1)
                 kv = self.norm4(kv) 
-                x1, k1, v1 = self.calculatex(kv, q)
+                
+                kv1 = self.kv(kv).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+                k1, v1 = kv1[0], kv1[1]  
+
                 
                 b, n, f, c = k.shape
                 k_ = rearrange(k, 'b n f c -> b (n c) f', n=n)
@@ -210,29 +212,28 @@ class Attention(nn.Module):
                 k2 = self.pool4(k_)
 
                 k2 = rearrange(k2, 'b (n c) f -> b n f c', n=n)
-                # k = torch.cat((k1, k2), dim=-2)
+                k = torch.cat((k1, k2), dim=-2)
 
                 v2 = self.pool5(v_)
 
                 v2 = rearrange(v2, 'b (n c) f -> b n f c', n=n)
-                # v = torch.cat((v1, v2), dim=-2)
+                v = torch.cat((v1, v2), dim=-2)
                 
                 if self.comb==True:
-                    attn = (q.transpose(-2, -1) @ k2) * self.scale
+                    attn = (q.transpose(-2, -1) @ k) * self.scale
                 elif self.comb==False:
-                    attn = (q @ k2.transpose(-2, -1)) * self.scale
+                    attn = (q @ k.transpose(-2, -1)) * self.scale
                 attn = attn.softmax(dim=-1)
                 attn = self.attn_drop(attn)
                 
                 if self.comb==True:
-                    x2 = (attn @ v2.transpose(-2, -1)).transpose(-2, -1)
+                    x = (attn @ v.transpose(-2, -1)).transpose(-2, -1)
                     # print(x.shape)
-                    x2 = rearrange(x2, 'B H N C -> B N (H C)')
+                    x = rearrange(x, 'B H N C -> B N (H C)')
                     # print(x.shape)
                 elif self.comb==False:
-                    x2 = (attn @ v2).transpose(1, 2).reshape(B, N, C)
+                    x = (attn @ v).transpose(1, 2).reshape(B, N, C)
                 
-                x = x1 + self.lambd * x2
                 x = self.proj(x)
                 x = self.proj_drop(x)
                 
