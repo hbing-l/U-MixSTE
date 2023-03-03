@@ -670,10 +670,8 @@ class  MixSTE2(nn.Module):
             # if i==7:
             #     x = tteblock(x, vis=True)
             #     exit()
-            if i > 4:
-                x, k, v = tteblock(x, cross_attn = True, k = k_list[9-i], v = v_list[9-i])
-            else:
-                x, k, v = tteblock(x)
+            x, k, v = tteblock(x, cross_attn = True, k = k_list[-1], v = v_list[-1])
+            
                 
             x = self.Temporal_norm(x)
             x = rearrange(x, '(b n) f cw -> b f n cw', n=n) # rearrange time dimension to joint dimension for subsequent Spatial Transformation
@@ -682,8 +680,7 @@ class  MixSTE2(nn.Module):
             
             x_list.append(x)
             
-            if i > 4:
-                x += x_list[7-i]
+            x += x_list[-1]
             
                 
         # x = rearrange(x, 'b f n cw -> (b n) f cw', n=n)
